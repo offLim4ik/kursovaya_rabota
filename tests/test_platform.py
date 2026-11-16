@@ -222,9 +222,19 @@ def test_demo_and_migrations_idempotent(app):
     assert runner.invoke(args=['enrich-demo']).exit_code == 0
     with app.app_context():
         assert one('SELECT count(*) n FROM assignments')['n'] == 6
+    assert runner.invoke(args=['add-extra-courses']).exit_code == 0
+    with app.app_context():
+        assert one('SELECT count(*) n FROM courses WHERE status=\'published\'')['n'] == 9
+        assert one('SELECT count(*) n FROM assignments')['n'] == 9
+        assert one('SELECT count(*) n FROM lessons')['n'] >= 27
+        assert one('SELECT count(*) n FROM questions')['n'] >= 18
+        assert one("SELECT count(*) n FROM lessons WHERE content LIKE '%<h2>%' ")['n'] >= 27
+    assert runner.invoke(args=['add-extra-courses']).exit_code == 0
+    with app.app_context():
+        assert one('SELECT count(*) n FROM courses')['n'] == 9
     assert runner.invoke(args=['enrich-demo']).exit_code == 0
     with app.app_context():
-        assert one('SELECT count(*) n FROM assignments')['n'] == 6
+        assert one('SELECT count(*) n FROM assignments')['n'] == 9
 
 
 def test_public_catalog_filters_and_reviews(app, published):

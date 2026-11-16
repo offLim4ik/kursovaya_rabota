@@ -8,6 +8,7 @@ import click
 from werkzeug.security import generate_password_hash
 
 from .db import db, migrate, one
+from .extra_courses import register_extra_course_command
 from .services import complete, event, lessons
 
 COURSES = [
@@ -43,6 +44,8 @@ COURSES = [
 
 
 def register_commands(app):
+    register_extra_course_command(app)
+
     @app.cli.command('create-admin')
     @click.option('--email', prompt='Email')
     @click.option('--name', prompt='Имя')

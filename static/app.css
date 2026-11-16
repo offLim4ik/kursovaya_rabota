@@ -15,3 +15,14 @@
 .review-work{background:#fff;border-top:4px solid #78c0e0}
 .submission-body{white-space:pre-wrap;overflow-wrap:anywhere;padding:16px;background:#f7f8fc;border-radius:12px;margin:14px 0;max-height:360px;overflow:auto}
 @media(max-width:720px){.assignment-editor,.assignment-card,.review-work{padding:14px}.rubric-row{grid-template-columns:1fr}.goal-panel .editor-grid{grid-template-columns:1fr}}
+.publication-readiness{margin-top:12px;padding:13px 14px;border-radius:11px;background:#fff8e8;border:1px solid #ead6a8;color:#574319;font-size:13px}
+.publication-readiness.ready{background:#eef8f2;border-color:#b9dfc8;color:#155b39}
+.publication-readiness ul{padding-left:20px;margin:8px 0 0}
+.publication-readiness li+li{margin-top:4px}
+.issue-link{border:0;background:transparent;color:inherit;padding:2px 0;text-align:left;text-decoration:underline;text-underline-offset:3px;font-weight:500}
+.issue-link:hover{background:transparent;color:#150578;transform:none}
+.validation-missing input,.validation-missing textarea,.validation-missing select,.field.validation-missing input,.field.validation-missing textarea,.field.validation-missing select{border-color:#b42336!important;box-shadow:0 0 0 3px #b4233620}
+.module-editor.validation-missing,.lesson-editor.validation-missing{border-color:#b42336!important;box-shadow:0 0 0 3px #b4233615}
+.question-editor.validation-missing,.option-editor.validation-missing{border-color:#b42336!important;box-shadow:0 0 0 2px #b4233615;border-radius:9px}
+input.validation-missing,textarea.validation-missing,select.validation-missing{border-color:#b42336!important;box-shadow:0 0 0 3px #b4233620}
+button.validation-missing{outline:3px solid #b42336;outline-offset:3px}
