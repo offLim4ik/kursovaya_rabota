@@ -217,7 +217,7 @@ def test_demo_and_migrations_idempotent(app):
         assert one('SELECT count(*) n FROM courses')['n'] == 6
         assert one('SELECT count(*) n FROM certificates')['n'] > 0
         assert one('SELECT count(*) n FROM reviews')['n'] > 0
-        assert one('SELECT count(*) n FROM migrations')['n'] == 2
+        assert one('SELECT count(*) n FROM migrations')['n'] == 3
     assert runner.invoke(args=['seed-demo']).exit_code != 0
 
 
@@ -261,3 +261,54 @@ def test_free_progression_can_be_configured_after_enrollment(app, admin, publish
     config['progression'] = 'free'
     assert call(admin, f'/admin/courses/{cid}', 'PUT', config).status_code == 200
     assert call(client, f'/lessons/{second}').status_code == 200
+
+
+def test_enrolled_modules_can_be_reorganized_without_losing_lesson_history(app, admin, published):
+    client = app.test_client()
+    register(client)
+    cid = published['id']
+    original = call(admin, f'/admin/courses/{cid}').json
+    module = original['modules'][0]
+    first, second = module['lessons']
+    call(client, f'/courses/{cid}/enroll', 'POST', {})
+    call(client, f'/lessons/{first["id"]}/open', 'POST', {})
+    revised = {
+        'title': original['title'], 'summary': original['summary'], 'description': original['description'],
+        'outcomes': original['outcomes'], 'prerequisites': original['prerequisites'],
+        'category_id': original['category_id'], 'level': original['level'], 'status': 'published',
+        'cover': original['cover'], 'progression': 'free',
+        'modules': [
+            {'id': module['id'], 'title': 'Основы', 'description': 'Ключевые понятия и разбор задачи.',
+             'outcomes': 'Объяснить базовые понятия', 'unlock_after_module_id': None,
+             'lessons': [{k: first[k] for k in ('id', 'title', 'content', 'video', 'minutes', 'quiz')}]},
+            {'title': 'Практика', 'description': 'Примените знания на новом примере.',
+             'outcomes': 'Решить задачу самостоятельно', 'unlock_after_module_id': module['id'],
+             'lessons': [{k: second[k] for k in ('id', 'title', 'content', 'video', 'minutes', 'quiz')}]},
+        ],
+    }
+    saved = call(admin, f'/admin/courses/{cid}', 'PUT', revised)
+    assert saved.status_code == 200, saved.json
+    assert len(saved.json['modules']) == 2
+    assert saved.json['modules'][0]['description'] == 'Ключевые понятия и разбор задачи.'
+    assert saved.json['modules'][1]['unlock_after_module_id'] == module['id']
+    assert call(client, f'/lessons/{first["id"]}').status_code == 200
+    assert call(client, f'/lessons/{second["id"]}').status_code == 403
+    with app.app_context():
+        progress = one('SELECT started_at,completed_at FROM progress WHERE lesson_id=?', (first['id'],))
+        assert progress['started_at'] and progress['completed_at'] is None
+        assert one('SELECT id FROM progress WHERE lesson_id=?', (second['id'],)) is None
+
+
+def test_module_cannot_depend_on_itself_or_a_later_module(admin, published):
+    original = call(admin, f'/admin/courses/{published["id"]}').json
+    module = original['modules'][0]
+    payload = {
+        'title': original['title'], 'summary': original['summary'], 'description': original['description'],
+        'outcomes': original['outcomes'], 'prerequisites': original['prerequisites'],
+        'category_id': original['category_id'], 'level': original['level'], 'status': 'published',
+        'cover': original['cover'], 'progression': 'sequential',
+        'modules': [{'id': module['id'], 'title': module['title'], 'unlock_after_module_id': module['id'],
+                     'lessons': [{k: l[k] for k in ('id', 'title', 'content', 'video', 'minutes', 'quiz')}
+                                 for l in module['lessons']]}],
+    }
+    assert call(admin, f'/admin/courses/{published["id"]}', 'PUT', payload).status_code == 400

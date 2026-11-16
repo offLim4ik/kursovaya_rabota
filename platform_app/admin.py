@@ -184,7 +184,10 @@ def save_course(cid):
             abort(400, 'Некорректный идентификатор модуля.')
         if mid:
             seen_modules.add(mid)
-        pm = {'id': mid, 'title': text(m.get('title'), 2, 150), 'lessons': []}
+        pm = {'id': mid, 'title': text(m.get('title'), 2, 150),
+              'description': text(m.get('description', ''), maximum=4000),
+              'outcomes': text(m.get('outcomes', ''), maximum=2000),
+              'unlock_after_module_id': m.get('unlock_after_module_id'), 'lessons': []}
         if not isinstance(m.get('lessons'), list) or len(m['lessons']) > 100:
             abort(400, 'Допускается до 100 уроков в модуле.')
         for l in m['lessons']:
@@ -199,9 +202,20 @@ def save_course(cid):
                                   'content': clean(l.get('content', '')), 'video': video_url(l.get('video', '')),
                                   'minutes': integer(l.get('minutes', 15), 1, 600), 'quiz': validate_quiz(l.get('quiz'))})
         prepared.append(pm)
+    known_module_ids = {m['id'] for m in prepared if m['id']}
+    for index, module in enumerate(prepared):
+        prerequisite = module['unlock_after_module_id']
+        if prerequisite:
+            prerequisite = integer(prerequisite)
+            if prerequisite not in known_module_ids or prerequisite == module['id']:
+                abort(400, 'Условие открытия должно ссылаться на другой модуль этого курса.')
+            prerequisite_index = next(i for i, item in enumerate(prepared) if item['id'] == prerequisite)
+            if prerequisite_index >= index:
+                abort(400, 'Условие открытия может ссылаться только на предыдущий модуль.')
+            module['unlock_after_module_id'] = prerequisite
     if original['locked_structure']:
-        if seen_lessons != old_lessons or any(not l['id'] for m in prepared for l in m['lessons']):
-            abort(400, 'На курс уже записались. Добавление и удаление уроков запрещено; создайте новый курс.')
+        if seen_lessons != old_lessons or any(not m['lessons'] for m in prepared) or any(not l['id'] for m in prepared for l in m['lessons']):
+            abort(400, 'На курс уже записались. Уроки сохраняются, но их можно переносить между модулями; добавьте или удалите уроки только в новом курсе.')
         for m in prepared:
             for l in m['lessons']:
                 old_q = quiz_data(l['id'], True)
@@ -219,9 +233,12 @@ def save_course(cid):
                  (title, description, short, outcomes, prerequisites, category, level, status, cover, progression, cid))
     for pos, m in enumerate(prepared):
         if m['id']:
-            db().execute('UPDATE modules SET title=?,position=? WHERE id=?', (m['title'], pos, m['id']))
+            db().execute('UPDATE modules SET title=?,position=?,description=?,outcomes=?,unlock_after_module_id=? WHERE id=?',
+                         (m['title'], pos, m['description'], m['outcomes'], m['unlock_after_module_id'], m['id']))
         else:
-            m['id'] = db().execute('INSERT INTO modules(course_id,title,position) VALUES (?,?,?)', (cid, m['title'], pos)).lastrowid
+            m['id'] = db().execute('INSERT INTO modules(course_id,title,position,description,outcomes,unlock_after_module_id) '
+                                   'VALUES (?,?,?,?,?,?)', (cid, m['title'], pos, m['description'], m['outcomes'],
+                                   m['unlock_after_module_id'])).lastrowid
         for lp, l in enumerate(m['lessons']):
             values = (m['id'], l['title'], l['content'], l['video'], l['minutes'], lp)
             if l['id']:

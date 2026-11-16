@@ -73,8 +73,11 @@ def audit(action, obj):
 
 
 def lessons(cid):
-    return rows('SELECT l.*,m.title module_title,m.position module_position FROM lessons l JOIN modules m '
-                'ON m.id=l.module_id WHERE m.course_id=? ORDER BY m.position,m.id,l.position,l.id', (cid,))
+    return rows('SELECT l.*,m.title module_title,m.position module_position,m.description module_description,'
+                'm.outcomes module_outcomes,m.unlock_after_module_id,pm.title prerequisite_module_title '
+                'FROM lessons l JOIN modules m ON m.id=l.module_id '
+                'LEFT JOIN modules pm ON pm.id=m.unlock_after_module_id '
+                'WHERE m.course_id=? ORDER BY m.position,m.id,l.position,l.id', (cid,))
 
 
 def enrollment(cid, uid=None):
@@ -96,14 +99,27 @@ def curriculum(cid, e=None, contents=False):
     done = {}
     if e:
         done = {p['lesson_id']: p for p in rows('SELECT * FROM progress WHERE enrollment_id=?', (e['id'],))}
+    module_lessons: dict[int, list[int]] = {}
+    for item in lessons(cid):
+        module_lessons.setdefault(item['module_id'], []).append(item['id'])
+    modules = {m['id']: m for m in rows('SELECT id,unlock_after_module_id FROM modules WHERE course_id=?', (cid,))}
+    module_open = {}
+    for mid, module in modules.items():
+        prerequisite = module['unlock_after_module_id']
+        module_open[mid] = not prerequisite or all(
+            done.get(lid) and done[lid]['completed_at'] for lid in module_lessons.get(prerequisite, [])
+        )
     previous_done = True
     result = []
     for lesson in lessons(cid):
         p = done.get(lesson['id'])
         finished = p and p['completed_at']
-        accessible = bool(e and (e['completed_at'] or finished or progression == 'free' or previous_done))
+        accessible = bool(e and (e['completed_at'] or finished or (module_open.get(lesson['module_id'], False)
+                           and (progression == 'free' or previous_done))))
         lesson['state'] = 'completed' if finished else ('started' if p and accessible else 'available' if accessible else 'locked')
         lesson['accessible'] = accessible
+        lesson['lock_reason'] = (f"Сначала завершите модуль «{lesson['prerequisite_module_title']}»"
+                                 if not module_open.get(lesson['module_id'], False) else 'Сначала завершите предыдущий урок')
         lesson['has_quiz'] = bool(one('SELECT id FROM quizzes WHERE lesson_id=?', (lesson['id'],)))
         if not contents:
             lesson.pop('content')
