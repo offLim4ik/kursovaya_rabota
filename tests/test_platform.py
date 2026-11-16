@@ -150,7 +150,12 @@ def test_full_learning_flow_and_privacy(app, published):
         assert one("SELECT count(*) n FROM events WHERE text LIKE 'Завершён урок%'")['n'] == 1
     call(client, '/logout', 'POST', {})
     call(client, '/login', 'POST', {'email': user['email'], 'password': 'Student-password-123'})
-    assert call(client, '/dashboard').json['courses'][0]['resume'] == second['id']
+    resumed = call(client, '/dashboard').json['courses'][0]
+    assert resumed['resume'] == second['id']
+    assert resumed['resume_title'] == second['title']
+    assert resumed['resume_module_title'] == published['modules'][0]['title']
+    assert resumed['resume_minutes'] == second['minutes']
+    assert resumed['remaining_minutes'] == second['minutes']
     lesson = call(client, f'/lessons/{second["id"]}').json
     question = lesson['quiz']['questions'][0]
     assert 'correct' not in question and 'explanation' not in question

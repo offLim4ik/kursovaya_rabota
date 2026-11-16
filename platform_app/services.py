@@ -147,15 +147,25 @@ def summary(c, uid=None):
     e = enrollment(c['id'], uid) if uid else None
     c['enrollment'] = e
     c['favorite'] = bool(uid and one('SELECT 1 FROM favorites WHERE user_id=? AND course_id=?', (uid, c['id'])))
-    c['done'] = one('SELECT count(*) n FROM progress WHERE enrollment_id=? AND completed_at IS NOT NULL', (e['id'],))['n'] if e else 0
+    completed_lessons = rows('SELECT lesson_id FROM progress WHERE enrollment_id=? AND completed_at IS NOT NULL',
+                             (e['id'],)) if e else []
+    completed_ids = {item['lesson_id'] for item in completed_lessons}
+    c['done'] = len(completed_ids)
     c['progress'] = 100 if e and e['completed_at'] else round(c['done'] / max(1, len(ls)) * 100)
     c['resume'] = None
+    c['resume_title'] = None
+    c['resume_module_title'] = None
+    c['resume_minutes'] = 0
+    c['remaining_minutes'] = sum(item['minutes'] for item in ls if item['id'] not in completed_ids)
     if e:
         plan = curriculum(c['id'], e)
         available = [x for x in plan if x['accessible']]
         preferred = next((x for x in available if x['id'] == e['last_lesson'] and x['state'] != 'completed'), None)
         target = preferred or next((x for x in available if x['state'] != 'completed'), None) or (available[-1] if available else None)
         c['resume'] = target['id'] if target else None
+        c['resume_title'] = target['title'] if target else None
+        c['resume_module_title'] = target['module_title'] if target else None
+        c['resume_minutes'] = target['minutes'] if target else 0
     return c
 
 
