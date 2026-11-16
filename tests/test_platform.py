@@ -83,6 +83,30 @@ def test_health_check_uses_database(app):
     assert response.json == {'status': 'ok'}
 
 
+def test_demo_library_has_18_courses_and_is_idempotent(app):
+    runner = app.test_cli_runner()
+    for command in ('seed-demo', 'upgrade-demo', 'enrich-demo', 'add-extra-courses'):
+        result = runner.invoke(args=[command])
+        assert result.exit_code == 0, result.output
+
+    first = runner.invoke(args=['fill-course-library'])
+    assert first.exit_code == 0, first.output
+    with app.app_context():
+        published = one("SELECT count(*) n FROM courses WHERE status='published'")['n']
+        lesson_counts = [row['n'] for row in db().execute(
+            "SELECT count(l.id) n FROM courses c LEFT JOIN modules m ON m.course_id=c.id "
+            "LEFT JOIN lessons l ON l.module_id=m.id WHERE c.status='published' GROUP BY c.id"
+        ).fetchall()]
+        assert published == 18
+        assert lesson_counts == [12] * 18
+        assert one('SELECT count(*) n FROM quizzes')['n'] >= 27
+        assert one('SELECT count(*) n FROM assignments')['n'] >= 9
+
+    second = runner.invoke(args=['fill-course-library'])
+    assert second.exit_code == 0, second.output
+    assert 'Новых курсов: 0; добавлено уроков: 0.' in second.output
+
+
 def test_publish_validation_and_xss(admin):
     cid = call(admin, '/admin/courses', 'POST', {'title': 'Пустой курс'}).json['id']
     c = call(admin, f'/admin/courses/{cid}').json
