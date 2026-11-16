@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: vector-learning-platform
+    runtime: docker
+    plan: 0.5c-512mb
+    healthCheckPath: /healthz
+    disk:
+      name: vector-platform-data
+      mountPath: /app/instance
+      sizeGB: 1
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE
+        value: instance/platform.sqlite3
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: PDF_FONT
+        value: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf

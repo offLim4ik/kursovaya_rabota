@@ -9,7 +9,7 @@ root = Path(__file__).resolve().parent.parent
 for folder in ('platform_app', 'scripts', 'tests'):
     if not compileall.compile_dir(root / folder, quiet=1):
         raise SystemExit('Python compilation failed')
-files = [root / x for x in ('app.py', 'requirements.txt', 'requirements-dev.txt', 'pyproject.toml', '.env.example', '.gitignore', 'README.md')]
+files = [root / x for x in ('app.py', 'requirements.txt', 'requirements-dev.txt', 'pyproject.toml', '.env.example', '.gitignore', '.dockerignore', 'Dockerfile', 'render.yaml', 'README.md')]
 for folder in ('platform_app', 'migrations', 'scripts', 'tests', 'docs'):
     files.extend(p for p in (root / folder).rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix in ('.py', '.sql', '.md', '.json'))
 files.extend([root / 'templates/shell.html', root / 'static/app.css', root / 'static/app.js', root / 'static/logo.svg'])

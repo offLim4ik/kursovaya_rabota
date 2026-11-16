@@ -82,4 +82,9 @@ def create_app(test_config=None):
     def index(path=''):
         return send_from_directory(root / 'templates', 'shell.html')
 
+    @app.get('/healthz')
+    def health():
+        db().execute('SELECT 1')
+        return jsonify(status='ok')
+
     return app

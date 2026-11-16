@@ -1,5 +1,6 @@
 import io
 import json
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -74,6 +75,12 @@ def test_csrf_roles_and_unknown_account(app):
     register(client)
     for path, method in [('/admin/overview', 'GET'), ('/admin/courses', 'POST'), ('/admin/users/1/block', 'POST')]:
         assert call(client, path, method, {} if method == 'POST' else None).status_code == 403
+
+
+def test_health_check_uses_database(app):
+    response = app.test_client().get('/healthz')
+    assert response.status_code == 200
+    assert response.json == {'status': 'ok'}
 
 
 def test_publish_validation_and_xss(admin):
@@ -235,6 +242,11 @@ def test_demo_and_migrations_idempotent(app):
     assert runner.invoke(args=['enrich-demo']).exit_code == 0
     with app.app_context():
         assert one('SELECT count(*) n FROM assignments')['n'] == 9
+
+
+def test_admin_editor_renders_publication_history_once():
+    source = (Path(__file__).resolve().parent.parent / 'static' / 'app.js').read_text(encoding='utf-8')
+    assert source.count('<h2>История публикаций</h2>') == 1
 
 
 def test_public_catalog_filters_and_reviews(app, published):
