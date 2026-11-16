@@ -1,6 +1,7 @@
 import json
 import re
 import secrets
+from datetime import datetime
 from typing import Any
 
 import click
@@ -227,5 +228,44 @@ def register_commands(app):
                                      (qid, question['text'], json.dumps(question['options'], ensure_ascii=False),
                                       json.dumps(question['correct']), question['explanation']))
             added += 1
+        assignment_specs = {
+            'Python: от первой строки до проекта': ('Анализатор расходов', 'Соберите программу, которая читает CSV, проверяет значения и выводит суммы по категориям. Сдайте исходный код и небольшой пример отчёта. Объясните, как обработали пустой файл и ошибочную строку.', 'text'),
+            'Интерфейсы, которые понятны людям': ('Прототип пути обучения', 'Подготовьте прототип каталога и страницы курса. Проведите хотя бы три коротких пользовательских теста, запишите наблюдения и покажите три улучшения интерфейса.', 'url'),
+            'SQL: уверенная работа с данными': ('Отчёт по воронке обучения', 'Напишите SQL для воронки записей и завершений по месячным когортам. Приложите запрос, определения числителя и знаменателя, сверку с исходными данными и короткий вывод.', 'file'),
+            'Тестирование веб-приложений': ('Набор проверок учебной платформы', 'Опишите критичные состояния пользователя и автоматизируйте проверки записи, последовательного доступа и повторной отправки теста. Добавьте инструкцию запуска и укажите пробелы покрытия.', 'text'),
+            'Управление цифровыми проектами': ('План запуска первой версии', 'Составьте план проверяемого запуска: цель, сценарий, границы MVP, задачи с условиями приёмки и три риска с сигналами и ответными действиями.', 'text'),
+            'Безопасность веб-сервисов': ('Модель угроз учебного API', 'Нарисуйте границы доверия, опишите угрозы для сессии, заметки и учебных файлов, затем приложите результаты двух проверок с разными аккаунтами и список остаточных рисков.', 'file'),
+        }
+        seeded_assignments = 0
+        for course_title, (assignment_title, instructions, submission_type) in assignment_specs.items():
+            target = one("SELECT c.id,l.id lesson_id FROM courses c JOIN modules m ON m.course_id=c.id JOIN lessons l ON l.module_id=m.id WHERE c.title=? AND m.title LIKE 'Проект:%' ORDER BY l.position DESC LIMIT 1", (course_title,))
+            if target and not one('SELECT id FROM assignments WHERE lesson_id=?', (target['lesson_id'],)):
+                rubric = [
+                    {'id': secrets.token_hex(6), 'title': 'Рабочий результат соответствует условию и запускается', 'max_score': 60},
+                    {'id': secrets.token_hex(6), 'title': 'Есть проверка качества и объяснение решений', 'max_score': 40},
+                ]
+                db().execute('INSERT INTO assignments(lesson_id,title,instructions,rubric,submission_type,max_score,required) VALUES (?,?,?,?,?,100,1)',
+                    (target['lesson_id'], assignment_title, instructions, json.dumps(rubric, ensure_ascii=False), submission_type))
+                seeded_assignments += 1
         db().commit()
-        click.echo(f'Добавлен проектный этап в курсы: {added}. Повторный запуск безопасен.')
+        click.echo(f'Добавлен проектный этап: {added}; настроено практических заданий: {seeded_assignments}. Повторный запуск безопасен.')
+
+    @app.cli.command('send-learning-reminders')
+    def send_learning_reminders():
+        """Create in-app reminders for learners who are behind their weekly goal."""
+        from .db import db, one, rows
+        now = datetime.now()
+        today = now.date().isoformat()
+        targets = rows('SELECT * FROM learning_goals WHERE reminder_enabled=1 AND reminder_time<=? AND (last_reminded_on IS NULL OR last_reminded_on<?)',
+                       (now.strftime('%H:%M'), today))
+        sent = 0
+        for target in targets:
+            minutes = one("SELECT COALESCE(sum(l.minutes),0) n FROM progress p JOIN lessons l ON l.id=p.lesson_id JOIN enrollments e ON e.id=p.enrollment_id WHERE e.user_id=? AND p.started_at>=datetime('now','-7 days')", (target['user_id'],))['n']
+            if minutes < target['weekly_minutes']:
+                remaining = target['weekly_minutes'] - minutes
+                db().execute('INSERT INTO notifications(user_id,text) VALUES (?,?)',
+                    (target['user_id'], f'Ваша учебная цель на неделю — {target["weekly_minutes"]} минут. До неё осталось {remaining} минут. Продолжите с последнего урока.'))
+                sent += 1
+            db().execute('UPDATE learning_goals SET last_reminded_on=? WHERE user_id=?', (today, target['user_id']))
+        db().commit()
+        click.echo(f'Создано напоминаний: {sent}.')

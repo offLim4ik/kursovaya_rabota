@@ -1,6 +1,7 @@
 import json
+import uuid
 
-from flask import Blueprint, abort, jsonify, request
+from flask import Blueprint, abort, g, jsonify, request
 
 from .db import db, one, rows
 from .services import (
@@ -37,7 +38,57 @@ def overview():
         registrations=rows('SELECT date(created_at) day,count(*) count FROM users WHERE date(created_at)>=date(\'now\',?) GROUP BY day', (since,)),
         enrollments=rows('SELECT date(created_at) day,count(*) count FROM enrollments WHERE date(created_at)>=date(\'now\',?) GROUP BY day', (since,)),
         popular=rows('SELECT c.id,c.title,count(e.id) count,sum(e.completed_at IS NOT NULL) completed FROM courses c LEFT JOIN enrollments e ON c.id=e.course_id GROUP BY c.id ORDER BY count DESC LIMIT 8'),
-        events=rows('SELECT e.*,u.name FROM events e JOIN users u ON u.id=e.user_id ORDER BY e.id DESC LIMIT 25'))
+        events=rows('SELECT e.*,u.name FROM events e JOIN users u ON u.id=e.user_id ORDER BY e.id DESC LIMIT 25'),
+        learning=rows("SELECT c.title,count(e.id) enrollments,round(avg(CASE WHEN e.completed_at IS NOT NULL THEN 100.0 ELSE 100.0*COALESCE(p.done,0)/NULLIF(t.total,0) END)) avg_progress FROM courses c LEFT JOIN enrollments e ON e.course_id=c.id LEFT JOIN (SELECT enrollment_id,count(*) done FROM progress WHERE completed_at IS NOT NULL GROUP BY enrollment_id) p ON p.enrollment_id=e.id LEFT JOIN (SELECT m.course_id,count(l.id) total FROM modules m JOIN lessons l ON l.module_id=m.id GROUP BY m.course_id) t ON t.course_id=c.id GROUP BY c.id ORDER BY enrollments DESC LIMIT 8"),
+        quiz_stats=rows('SELECT c.title,count(a.id) attempts,round(avg(a.score)) avg_score,sum(a.passed) passed FROM attempts a JOIN quizzes q ON q.id=a.quiz_id JOIN lessons l ON l.id=q.lesson_id JOIN modules m ON m.id=l.module_id JOIN courses c ON c.id=m.course_id GROUP BY c.id ORDER BY attempts DESC LIMIT 8'))
+
+
+@admin.get('/assignments/reviews')
+def assignment_reviews():
+    result = rows("SELECT s.*,a.title assignment_title,a.rubric,l.title lesson_title,c.id course_id,c.title course_title,u.name user_name,u.email,mf.name file_name FROM assignment_submissions s JOIN assignments a ON a.id=s.assignment_id JOIN lessons l ON l.id=a.lesson_id JOIN modules m ON m.id=l.module_id JOIN courses c ON c.id=m.course_id JOIN users u ON u.id=s.user_id LEFT JOIN materials mf ON mf.id=s.attachment_id WHERE s.status IN ('submitted','revision') ORDER BY s.submitted_at LIMIT 200")
+    for item in result:
+        item['rubric'] = json.loads(item['rubric'])
+        item['rubric_scores'] = json.loads(item['rubric_scores'])
+    return jsonify(result)
+
+
+@admin.post('/assignments/submissions/<int:sid>/review')
+def review_assignment(sid):
+    d = data()
+    submission = one('SELECT s.*,a.max_score,a.rubric,a.lesson_id FROM assignment_submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=?', (sid,))
+    if not submission:
+        abort(404, 'Работа не найдена.')
+    if submission['status'] == 'approved':
+        abort(409, 'Эта работа уже принята и не требует повторной проверки.')
+    status = d.get('status')
+    if status not in ('revision', 'approved'):
+        abort(400, 'Выберите решение: принять или вернуть на доработку.')
+    feedback = text(d.get('feedback'), 2, 5000)
+    score = integer(d.get('score'), 0, submission['max_score'])
+    rubric = json.loads(submission['rubric'])
+    rubric_scores = d.get('rubric_scores', {})
+    if not isinstance(rubric_scores, dict) or set(rubric_scores) - {str(x['id']) for x in rubric}:
+        abort(400, 'Оценки не соответствуют критериям задания.')
+    for criterion in rubric:
+        value = integer(rubric_scores.get(str(criterion['id']), 0), 0, criterion['max_score'])
+        rubric_scores[str(criterion['id'])] = value
+    if sum(rubric_scores.values()) != score:
+        abort(400, 'Итоговый балл должен совпадать с суммой оценок по критериям.')
+    db().execute('UPDATE assignment_submissions SET status=?,score=?,feedback=?,rubric_scores=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?',
+                 (status, score, feedback, json.dumps(rubric_scores), sid))
+    l = one('SELECT * FROM lessons WHERE id=?', (submission['lesson_id'],))
+    e = one('SELECT * FROM enrollments WHERE user_id=? AND course_id=(SELECT course_id FROM modules WHERE id=(SELECT module_id FROM lessons WHERE id=?))', (submission['user_id'], submission['lesson_id']))
+    quiz = one('SELECT id FROM quizzes WHERE lesson_id=?', (l['id'],))
+    passed_attempt = one('SELECT id FROM attempts WHERE user_id=? AND quiz_id=? AND passed=1 LIMIT 1',
+                         (submission['user_id'], quiz['id'])) if quiz else True
+    if status == 'approved' and e and passed_attempt:
+        from .services import complete
+        complete(l, e)
+    db().execute('INSERT INTO notifications(user_id,text) VALUES (?,?)',
+                 (submission['user_id'], 'Практическая работа проверена: ' + ('принята' if status == 'approved' else 'нужна доработка') + '.'))
+    audit('Проверена практическая работа', f'Работа {sid}, решение: {status}, балл: {score}')
+    db().commit()
+    return jsonify(ok=True)
 
 
 @admin.get('/audit')
@@ -113,8 +164,22 @@ def editor_data(cid):
         for l in m['lessons']:
             l['quiz'] = quiz_data(l['id'], True)
             l['materials'] = rows('SELECT id,name,kind FROM materials WHERE lesson_id=?', (l['id'],))
+            assignment = one('SELECT * FROM assignments WHERE lesson_id=?', (l['id'],))
+            if assignment:
+                assignment['rubric'] = json.loads(assignment['rubric'])
+            l['assignment'] = assignment
     c['locked_structure'] = bool(one('SELECT id FROM enrollments WHERE course_id=? LIMIT 1', (cid,)))
+    c['versions'] = rows('SELECT version,change_note,created_at FROM course_versions WHERE course_id=? ORDER BY version DESC LIMIT 20', (cid,))
     return c
+
+
+@admin.get('/courses/<int:cid>/versions/<int:version>')
+def get_version(cid, version):
+    version_row = one('SELECT snapshot FROM course_versions WHERE course_id=? AND version=?', (cid, version))
+    if not version_row:
+        abort(404, 'Версия курса не найдена.')
+    snapshot = json.loads(version_row['snapshot'])
+    return jsonify(snapshot)
 
 
 @admin.get('/courses/<int:cid>')
@@ -198,9 +263,36 @@ def save_course(cid):
                 abort(400, 'Некорректный идентификатор урока.')
             if lid:
                 seen_lessons.add(lid)
+            assignment = l.get('assignment')
+            if assignment is not None:
+                if not isinstance(assignment, dict):
+                    abort(400, 'Некорректная практическая работа.')
+                rubric = assignment.get('rubric')
+                if not isinstance(rubric, list) or not 1 <= len(rubric) <= 12:
+                    abort(400, 'Добавьте от 1 до 12 критериев оценки.')
+                prepared_rubric = []
+                for ci, criterion in enumerate(rubric):
+                    if not isinstance(criterion, dict):
+                        abort(400, 'Некорректный критерий оценки.')
+                    prepared_rubric.append({'id': str(criterion.get('id') or uuid.uuid4()),
+                        'title': text(criterion.get('title'), 2, 150), 'max_score': integer(criterion.get('max_score'), 1, 100)})
+                if type(assignment.get('required', True)) is not bool:
+                    abort(400, 'Укажите корректно, обязательно ли задание.')
+                submission_type = assignment.get('submission_type')
+                if submission_type not in ('text', 'url', 'file'):
+                    abort(400, 'Выберите текст, ссылку или файл для сдачи работы.')
+                prepared_assignment = {'title': text(assignment.get('title'), 2, 150),
+                    'instructions': text(assignment.get('instructions'), 10, 10000), 'rubric': prepared_rubric,
+                    'submission_type': submission_type, 'max_score': integer(assignment.get('max_score', 100), 1, 1000),
+                    'required': bool(assignment.get('required', True))}
+                if sum(x['max_score'] for x in prepared_rubric) != prepared_assignment['max_score']:
+                    abort(400, 'Сумма баллов по критериям должна совпадать с максимумом задания.')
+            else:
+                prepared_assignment = None
             pm['lessons'].append({'id': lid, 'title': text(l.get('title'), 2, 150),
                                   'content': clean(l.get('content', '')), 'video': video_url(l.get('video', '')),
-                                  'minutes': integer(l.get('minutes', 15), 1, 600), 'quiz': validate_quiz(l.get('quiz'))})
+                                  'minutes': integer(l.get('minutes', 15), 1, 600), 'quiz': validate_quiz(l.get('quiz')),
+                                  'assignment': prepared_assignment})
         prepared.append(pm)
     known_module_ids = {m['id'] for m in prepared if m['id']}
     for index, module in enumerate(prepared):
@@ -229,6 +321,11 @@ def save_course(cid):
         for m in prepared:
             if not m['lessons'] or any(not l['content'] and not l['video'] and not l['quiz'] for l in m['lessons']):
                 abort(400, 'В каждом модуле нужны уроки, а в каждом уроке — материал или тест.')
+    if original['status'] == 'published' and not one('SELECT id FROM course_versions WHERE course_id=? LIMIT 1', (cid,)):
+        baseline = dict(original)
+        baseline.pop('versions', None)
+        db().execute('INSERT INTO course_versions(course_id,version,snapshot,change_note,created_by) VALUES (?,?,?,?,?)',
+                     (cid, 1, json.dumps(baseline, ensure_ascii=False, sort_keys=True), 'Состояние на момент включения истории версий', g.user['id']))
     db().execute('UPDATE courses SET title=?,description=?,summary=?,outcomes=?,prerequisites=?,category_id=?,level=?,status=?,cover=?,progression=? WHERE id=?',
                  (title, description, short, outcomes, prerequisites, category, level, status, cover, progression, cid))
     for pos, m in enumerate(prepared):
@@ -252,6 +349,23 @@ def save_course(cid):
                     for q in l['quiz']['questions']:
                         db().execute('INSERT INTO questions(quiz_id,text,options,correct,explanation) VALUES (?,?,?,?,?)',
                                      (qid, q['text'], json.dumps(q['options'], ensure_ascii=False), json.dumps(q['correct']), q['explanation']))
+            if l['assignment']:
+                assignment = l['assignment']
+                prior = one('SELECT * FROM assignments WHERE lesson_id=?', (l['id'],))
+                submissions = one('SELECT count(*) n FROM assignment_submissions WHERE assignment_id=?',
+                                  (prior['id'],))['n'] if prior else 0
+                if prior and submissions and any((
+                    prior['title'] != assignment['title'], prior['instructions'] != assignment['instructions'],
+                    json.loads(prior['rubric']) != assignment['rubric'],
+                    prior['submission_type'] != assignment['submission_type'],
+                    prior['max_score'] != assignment['max_score'], bool(prior['required']) != assignment['required'])):
+                    abort(400, 'Критерии задания зафиксированы после первой сдачи, чтобы не менять оценку задним числом.')
+                db().execute('INSERT INTO assignments(lesson_id,title,instructions,rubric,submission_type,max_score,required) VALUES (?,?,?,?,?,?,?) '
+                    'ON CONFLICT(lesson_id) DO UPDATE SET title=excluded.title,instructions=excluded.instructions,rubric=excluded.rubric,submission_type=excluded.submission_type,max_score=excluded.max_score,required=excluded.required',
+                    (l['id'], assignment['title'], assignment['instructions'], json.dumps(assignment['rubric'], ensure_ascii=False),
+                     assignment['submission_type'], assignment['max_score'], assignment['required']))
+            elif not db().execute('SELECT id FROM assignment_submissions WHERE assignment_id=(SELECT id FROM assignments WHERE lesson_id=?) LIMIT 1', (l['id'],)).fetchone():
+                db().execute('DELETE FROM assignments WHERE lesson_id=?', (l['id'],))
     for lid in old_lessons - seen_lessons:
         db().execute('DELETE FROM materials WHERE lesson_id=?', (lid,))
         db().execute('DELETE FROM quizzes WHERE lesson_id=?', (lid,))
@@ -259,6 +373,15 @@ def save_course(cid):
     for mid in old_modules - seen_modules:
         db().execute('DELETE FROM modules WHERE id=?', (mid,))
     audit('Сохранён курс: ' + status, f'{cid}: {title}')
+    if status == 'published':
+        snapshot = editor_data(cid)
+        snapshot.pop('versions', None)
+        encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+        latest = one('SELECT snapshot FROM course_versions WHERE course_id=? ORDER BY version DESC LIMIT 1', (cid,))
+        if not latest or latest['snapshot'] != encoded:
+            version = one('SELECT COALESCE(MAX(version),0)+1 n FROM course_versions WHERE course_id=?', (cid,))['n']
+            db().execute('INSERT INTO course_versions(course_id,version,snapshot,change_note,created_by) VALUES (?,?,?,?,?)',
+                         (cid, version, encoded, text(d.get('change_note', 'Изменения опубликованного курса'), maximum=250), g.user['id']))
     db().commit()
     return jsonify(editor_data(cid))
 

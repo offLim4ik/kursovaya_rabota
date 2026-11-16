@@ -217,8 +217,14 @@ def test_demo_and_migrations_idempotent(app):
         assert one('SELECT count(*) n FROM courses')['n'] == 6
         assert one('SELECT count(*) n FROM certificates')['n'] > 0
         assert one('SELECT count(*) n FROM reviews')['n'] > 0
-        assert one('SELECT count(*) n FROM migrations')['n'] == 3
+        assert one('SELECT count(*) n FROM migrations')['n'] == 4
     assert runner.invoke(args=['seed-demo']).exit_code != 0
+    assert runner.invoke(args=['enrich-demo']).exit_code == 0
+    with app.app_context():
+        assert one('SELECT count(*) n FROM assignments')['n'] == 6
+    assert runner.invoke(args=['enrich-demo']).exit_code == 0
+    with app.app_context():
+        assert one('SELECT count(*) n FROM assignments')['n'] == 6
 
 
 def test_public_catalog_filters_and_reviews(app, published):
@@ -312,3 +318,107 @@ def test_module_cannot_depend_on_itself_or_a_later_module(admin, published):
                                  for l in module['lessons']]}],
     }
     assert call(admin, f'/admin/courses/{published["id"]}', 'PUT', payload).status_code == 400
+
+
+def test_assignment_review_gates_lesson_and_preserves_privacy(app, admin, published):
+    learner = app.test_client()
+    register(learner)
+    cid = published['id']
+    first = published['modules'][0]['lessons'][0]
+    call(learner, f'/courses/{cid}/enroll', 'POST', {})
+    current = call(admin, f'/admin/courses/{cid}').json
+    current['modules'][0]['lessons'][0]['assignment'] = {
+        'title': 'Подготовить чек-лист', 'instructions': 'Составьте чек-лист проверки формы и покажите, как он выявляет ошибки.',
+        'submission_type': 'text', 'max_score': 100, 'required': True,
+        'rubric': [{'id': 'coverage', 'title': 'Покрыты позитивные и негативные сценарии', 'max_score': 60},
+                   {'id': 'clarity', 'title': 'Шаги воспроизводимы', 'max_score': 40}]}
+    assert call(admin, f'/admin/courses/{cid}', 'PUT', current).status_code == 200
+    lesson = call(learner, f'/lessons/{first["id"]}').json
+    assert lesson['assignment']['title'] == 'Подготовить чек-лист'
+    assert call(learner, f'/lessons/{first["id"]}/complete', 'POST', {}).status_code == 400
+    assert call(learner, f'/lessons/{first["id"]}/assignment', 'POST', {'body': 'Проверка успешной отправки формы. Проверка ошибок и граничных условий.'}).status_code == 200
+    other = app.test_client()
+    register(other, 'other@example.test')
+    call(other, f'/courses/{cid}/enroll', 'POST', {})
+    assert call(other, f'/lessons/{first["id"]}').json['assignment']['submission'] is None
+    queue = call(admin, '/admin/assignments/reviews')
+    assert len(queue.json) == 1 and queue.json[0]['user_name'] == 'Анна Тестовая'
+    submission = queue.json[0]
+    reviewed = call(admin, f'/admin/assignments/submissions/{submission["id"]}/review', 'POST', {
+        'status': 'approved', 'feedback': 'Чек-лист помогает пройти сценарий повторяемо.', 'score': 92,
+        'rubric_scores': {'coverage': 55, 'clarity': 37}})
+    assert reviewed.status_code == 200
+    assert call(learner, '/dashboard').json['courses'][0]['progress'] == 50
+
+
+def test_published_course_versions_capture_and_restore_snapshot(admin, published):
+    cid = published['id']
+    payload = call(admin, f'/admin/courses/{cid}').json
+    payload['change_note'] = 'Уточнены результаты обучения'
+    payload['description'] += '\n\nДобавлен сценарий самостоятельной проверки.'
+    saved = call(admin, f'/admin/courses/{cid}', 'PUT', payload)
+    assert saved.status_code == 200
+    versions = saved.json['versions']
+    assert [row['version'] for row in versions] == [2, 1]
+    snapshot = call(admin, f'/admin/courses/{cid}/versions/1')
+    assert snapshot.status_code == 200
+    assert 'Добавлен сценарий' not in snapshot.json['description']
+    restored = call(admin, f'/admin/courses/{cid}', 'PUT', snapshot.json)
+    assert restored.status_code == 200 and 'Добавлен сценарий' not in restored.json['description']
+    assert restored.json['versions'][0]['version'] == 3
+    with admin.session_transaction() as sess:
+        assert sess['uid'] == 1
+
+
+def test_learning_goal_and_due_notification(app):
+    client = app.test_client()
+    register(client)
+    response = call(client, '/learning-goal', 'PUT', {'weekly_minutes': 180, 'reminder_time': '00:00', 'reminder_enabled': True})
+    assert response.status_code == 200
+    runner = app.test_cli_runner()
+    assert runner.invoke(args=['send-learning-reminders']).exit_code == 0
+    dashboard = call(client, '/dashboard').json
+    assert dashboard['goal']['weekly_minutes'] == 180
+    assert any('учебная цель' in item['text'] for item in dashboard['notifications'])
+    assert runner.invoke(args=['send-learning-reminders']).exit_code == 0
+    assert len(call(client, '/dashboard').json['notifications']) == 1
+
+
+def test_analytics_and_assignment_file_is_private(app, admin, published):
+    learner = app.test_client()
+    register(learner)
+    cid = published['id']
+    first = published['modules'][0]['lessons'][0]
+    call(learner, f'/courses/{cid}/enroll', 'POST', {})
+    csrf = learner.get('/api/session').json['csrf']
+    upload = learner.post('/api/upload', data={'purpose': 'assignment', 'lesson_id': str(first['id']),
+        'file': (io.BytesIO(b'private answer'), 'answer.txt')}, headers={'X-CSRF-Token': csrf})
+    assert upload.status_code == 400  # file uploads require an assignment configured for that format
+    d = call(admin, '/admin/overview?days=7')
+    assert d.status_code == 200 and d.json['stats']['enrollments'] == 1
+    assert isinstance(d.json['learning'], list) and isinstance(d.json['quiz_stats'], list)
+
+
+def test_assignment_upload_is_private_to_submitter(app, admin, published):
+    cid = published['id']
+    first = published['modules'][0]['lessons'][0]
+    payload = call(admin, f'/admin/courses/{cid}').json
+    payload['modules'][0]['lessons'][0]['assignment'] = {
+        'title': 'Сдать отчёт', 'instructions': 'Подготовьте краткий отчёт и приложите файл с результатами работы.',
+        'submission_type': 'file', 'max_score': 100, 'required': True,
+        'rubric': [{'id': 'file', 'title': 'Отчёт оформлен и открывается', 'max_score': 100}]}
+    assert call(admin, f'/admin/courses/{cid}', 'PUT', payload).status_code == 200
+    learner = app.test_client()
+    register(learner)
+    call(learner, f'/courses/{cid}/enroll', 'POST', {})
+    csrf = learner.get('/api/session').json['csrf']
+    upload = learner.post('/api/upload', data={'purpose': 'assignment', 'lesson_id': str(first['id']),
+        'file': (io.BytesIO(b'private result'), 'result.txt')}, headers={'X-CSRF-Token': csrf})
+    assert upload.status_code == 200
+    assert call(learner, f'/lessons/{first["id"]}/assignment', 'POST', {'attachment_id': upload.json['id']}).status_code == 200
+    assert learner.get(upload.json['url']).status_code == 200
+    other = app.test_client()
+    register(other, 'other@example.test')
+    call(other, f'/courses/{cid}/enroll', 'POST', {})
+    assert other.get(upload.json['url']).status_code == 404
+    assert call(admin, '/admin/assignments/reviews').json[0]['file_name'] == 'result.txt'

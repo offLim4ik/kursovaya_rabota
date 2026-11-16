@@ -6,6 +6,7 @@ import secrets
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 from flask import Blueprint, abort, current_app, g, jsonify, request, send_file, session
 from PIL import Image, UnidentifiedImageError
@@ -196,7 +197,27 @@ def dashboard():
                    notifications=rows('SELECT * FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 100', (uid,)),
                    certificates=rows('SELECT c.* FROM certificates c JOIN enrollments e ON e.id=c.enrollment_id WHERE e.user_id=?', (uid,)),
                    stats={'courses': sum(bool(c['enrollment']['completed_at']) for c in cs), 'lessons': sum(c['done'] for c in cs),
-                          'score': one('SELECT round(avg(score)) n FROM attempts WHERE user_id=?', (uid,))['n'] or 0})
+                          'score': one('SELECT round(avg(score)) n FROM attempts WHERE user_id=?', (uid,))['n'] or 0},
+                   goal=one('SELECT * FROM learning_goals WHERE user_id=?', (uid,)) or {'weekly_minutes':120,'reminder_time':'18:00','reminder_enabled':1},
+                   study_minutes=one("SELECT COALESCE(sum(l.minutes),0) n FROM progress p JOIN lessons l ON l.id=p.lesson_id JOIN enrollments e ON e.id=p.enrollment_id WHERE e.user_id=? AND p.started_at>=datetime('now','-7 days')", (uid,))['n'])
+
+
+@api.put('/learning-goal')
+@require()
+def learning_goal():
+    d = data()
+    weekly_minutes = integer(d.get('weekly_minutes'), 15, 2400)
+    reminder_time = text(d.get('reminder_time'), 5, 5)
+    if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', reminder_time):
+        abort(400, 'Укажите время в формате ЧЧ:ММ.')
+    enabled = d.get('reminder_enabled')
+    if not isinstance(enabled, bool):
+        abort(400, 'Некорректное состояние напоминаний.')
+    db().execute('INSERT INTO learning_goals(user_id,weekly_minutes,reminder_time,reminder_enabled) VALUES (?,?,?,?) '
+                 'ON CONFLICT(user_id) DO UPDATE SET weekly_minutes=excluded.weekly_minutes,reminder_time=excluded.reminder_time,reminder_enabled=excluded.reminder_enabled',
+                 (g.user['id'], weekly_minutes, reminder_time, enabled))
+    db().commit()
+    return jsonify(ok=True)
 
 
 @api.post('/notifications/read')
@@ -219,7 +240,46 @@ def get_lesson(lid):
     l['attempts'] = rows('SELECT a.id,a.score,a.passed,a.created_at,a.feedback FROM attempts a JOIN quizzes q ON q.id=a.quiz_id WHERE q.lesson_id=? AND a.user_id=? ORDER BY a.id DESC', (lid, g.user['id']))
     for attempt in l['attempts']:
         attempt['feedback'] = json.loads(attempt['feedback'])
+    assignment = one('SELECT * FROM assignments WHERE lesson_id=?', (lid,))
+    if assignment:
+        assignment['rubric'] = json.loads(assignment['rubric'])
+        assignment['submission'] = one('SELECT s.*,m.name file_name FROM assignment_submissions s LEFT JOIN materials m ON m.id=s.attachment_id WHERE s.assignment_id=? AND s.user_id=?', (assignment['id'], g.user['id']))
+        if assignment['submission']:
+            assignment['submission']['rubric_scores'] = json.loads(assignment['submission']['rubric_scores'])
+    l['assignment'] = assignment
     return jsonify(l)
+
+
+@api.post('/lessons/<int:lid>/assignment')
+@require()
+def submit_assignment(lid):
+    lesson, e = lesson_access(lid)
+    assignment = one('SELECT * FROM assignments WHERE lesson_id=?', (lid,))
+    if not assignment:
+        abort(404, 'Практическое задание не найдено.')
+    d = data()
+    body = text(d.get('body', ''), maximum=20000)
+    attachment_id = d.get('attachment_id')
+    if assignment['submission_type'] == 'text' and len(body.strip()) < 10:
+        abort(400, 'Добавьте ответ объёмом не менее 10 символов.')
+    if assignment['submission_type'] == 'url':
+        parsed = urlparse(body)
+        if parsed.scheme != 'https' or not parsed.netloc or len(body) > 2000:
+            abort(400, 'Укажите корректную ссылку с https://.')
+    if assignment['submission_type'] == 'file':
+        attachment_id = integer(attachment_id)
+        if not one("SELECT id FROM materials WHERE id=? AND private_owner=? AND lesson_id=? AND kind='file'", (attachment_id, g.user['id'], lid)):
+            abort(400, 'Сначала загрузите свой файл к заданию.')
+    existing = one('SELECT * FROM assignment_submissions WHERE assignment_id=? AND user_id=?', (assignment['id'], g.user['id']))
+    if existing and existing['status'] == 'approved':
+        abort(409, 'Принятую работу нельзя заменить.')
+    db().execute('INSERT INTO assignment_submissions(assignment_id,user_id,body,attachment_id,status) VALUES (?,?,?,? ,\'submitted\') '
+        'ON CONFLICT(assignment_id,user_id) DO UPDATE SET body=excluded.body,attachment_id=excluded.attachment_id,status=\'submitted\',score=NULL,feedback=\'\',rubric_scores=\'{}\',submitted_at=CURRENT_TIMESTAMP,reviewed_at=NULL',
+        (assignment['id'], g.user['id'], body, attachment_id))
+    db().execute('UPDATE enrollments SET last_activity=CURRENT_TIMESTAMP,last_lesson=? WHERE id=?', (lid, e['id']))
+    event(g.user['id'], lesson['course_id'], 'Сдана практическая работа «' + assignment['title'] + '»')
+    db().commit()
+    return jsonify(ok=True)
 
 
 @api.post('/lessons/<int:lid>/open')
@@ -240,6 +300,9 @@ def finish_lesson(lid):
     l, e = lesson_access(lid)
     if one('SELECT id FROM quizzes WHERE lesson_id=?', (lid,)):
         abort(400, 'Для завершения урока пройдите тест.')
+    assignment = one("SELECT a.id FROM assignments a LEFT JOIN assignment_submissions s ON s.assignment_id=a.id AND s.user_id=? WHERE a.lesson_id=? AND a.required=1 AND (s.status IS NULL OR s.status!='approved')", (g.user['id'], lid))
+    if assignment:
+        abort(400, 'Сначала сдайте практическую работу и дождитесь её принятия.')
     complete(l, e)
     db().commit()
     return jsonify(ok=True)
@@ -280,7 +343,8 @@ def attempt(lid):
                  (g.user['id'], q['id'], score, passed, json.dumps(answers), json.dumps(feedback, ensure_ascii=False)))
     db().execute('UPDATE enrollments SET last_activity=CURRENT_TIMESTAMP WHERE id=?', (e['id'],))
     event(g.user['id'], l['course_id'], f'Тест «{l["title"]}»: {score}%')
-    if passed:
+    assignment = one("SELECT a.id FROM assignments a LEFT JOIN assignment_submissions s ON s.assignment_id=a.id AND s.user_id=? WHERE a.lesson_id=? AND a.required=1 AND (s.status IS NULL OR s.status!='approved')", (g.user['id'], lid))
+    if passed and not assignment:
         complete(l, e)
     db().commit()
     return jsonify(score=score, passed=passed, feedback=feedback)
@@ -307,13 +371,17 @@ def upload():
     if not file or not file.filename:
         abort(400, 'Выберите файл.')
     purpose = request.form.get('purpose', 'avatar')
-    if purpose not in ('avatar', 'cover', 'material') or (purpose != 'avatar' and g.user['role'] != 'admin'):
+    if purpose not in ('avatar', 'cover', 'material', 'assignment') or (purpose != 'avatar' and purpose != 'assignment' and g.user['role'] != 'admin'):
         abort(403, 'Недостаточно прав.')
     lid = request.form.get('lesson_id')
-    if purpose == 'material':
+    if purpose in ('material', 'assignment'):
         lid = integer(lid)
         if not one('SELECT id FROM lessons WHERE id=?', (lid,)):
             abort(404, 'Урок не найден.')
+        if purpose == 'assignment':
+            lesson_access(lid)
+            if not one("SELECT id FROM assignments WHERE lesson_id=? AND submission_type='file'", (lid,)):
+                abort(400, 'Для этого задания не предусмотрена загрузка файла.')
     else:
         lid = None
     raw = file.read(8 * 1024 * 1024 + 1)
@@ -321,6 +389,8 @@ def upload():
         abort(400, 'Максимальный размер файла — 8 МБ.')
     suffix = Path(file.filename).suffix.lower()
     kind = 'file'
+    if purpose == 'assignment' and suffix not in ('.pdf', '.txt', '.csv'):
+        abort(400, 'Практическую работу можно сдать в формате PDF, TXT или CSV.')
     if suffix in ('.png', '.jpg', '.jpeg', '.webp'):
         try:
             img = Image.open(io.BytesIO(raw))
@@ -335,7 +405,7 @@ def upload():
             kind = 'image'
         except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
             abort(400, 'Не удалось прочитать изображение.')
-    elif purpose != 'material' or suffix not in ('.pdf', '.txt', '.csv'):
+    elif purpose not in ('material', 'assignment') or suffix not in ('.pdf', '.txt', '.csv'):
         abort(400, 'Разрешены JPG, PNG, WebP; для уроков также PDF, TXT и CSV.')
     elif suffix == '.pdf' and not raw.startswith(b'%PDF-'):
         abort(400, 'Некорректный PDF.')
@@ -344,13 +414,14 @@ def upload():
             raw.decode('utf-8')
         except UnicodeDecodeError:
             abort(400, 'Текстовый файл должен использовать UTF-8.')
-    if purpose != 'avatar':
+    if purpose not in ('avatar', 'assignment'):
         audit('Загружен материал' if purpose == 'material' else 'Загружена обложка', Path(file.filename).name[:120])
     filename = uuid.uuid4().hex + suffix
     path = Path(current_app.config['UPLOAD_FOLDER']) / filename
     path.write_bytes(raw)
-    mid = db().execute('INSERT INTO materials(owner_id,lesson_id,name,path,kind,public) VALUES (?,?,?,?,?,?)',
-                       (g.user['id'], lid, Path(file.filename).name[:120], filename, kind, purpose != 'material')).lastrowid
+    private_owner = g.user['id'] if purpose == 'assignment' else None
+    mid = db().execute('INSERT INTO materials(owner_id,lesson_id,name,path,kind,public,private_owner) VALUES (?,?,?,?,?,?,?)',
+                       (g.user['id'], lid, Path(file.filename).name[:120], filename, kind, purpose not in ('material', 'assignment'), private_owner)).lastrowid
     db().commit()
     return jsonify(url=f'/api/media/{mid}', id=mid)
 
@@ -363,7 +434,9 @@ def media(mid):
     if not m['public']:
         if not g.user:
             abort(401, 'Войдите в аккаунт.')
-        if g.user['role'] != 'admin':
+        if m['private_owner'] is not None and g.user['role'] != 'admin' and m['private_owner'] != g.user['id']:
+            abort(404, 'Файл не найден.')
+        if m['private_owner'] is None and g.user['role'] != 'admin':
             lesson_access(m['lesson_id'])
     return send_file(Path(current_app.config['UPLOAD_FOLDER']) / m['path'], as_attachment=m['kind'] == 'file', download_name=m['name'])
 
