@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 110
+exclude = [".venv"]
+
+[tool.mypy]
+ignore_missing_imports = true
+check_untyped_defs = true
+files = ["platform_app", "app.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
