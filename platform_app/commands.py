@@ -9,7 +9,7 @@ from werkzeug.security import generate_password_hash
 
 from .db import db, migrate, one
 from .extra_courses import register_extra_course_command
-from .services import complete, event, lessons
+from .services import complete, event, lessons, text
 
 COURSES = [
     ('Python: от первой строки до проекта', 'Программирование', 'Начальный', 'Освойте основы Python и соберите анализатор личных расходов.',
@@ -59,6 +59,23 @@ def register_commands(app):
         db().execute("INSERT INTO users(email,name,password,role) VALUES (?,?,?,'admin')", (email.lower(), name, generate_password_hash(password)))
         db().commit()
         click.echo('Администратор создан.')
+
+    @app.cli.command('reset-admin-password')
+    @click.option('--email', prompt='Email администратора')
+    @click.password_option(confirmation_prompt=True)
+    def reset_admin_password(email, password):
+        """Safely reset an existing administrator password and revoke old sessions."""
+        migrate()
+        email = text(email, 5, 254).lower()
+        if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email) or not 10 <= len(password) <= 128:
+            raise click.ClickException('Проверьте email и пароль (10–128 символов).')
+        user = one("SELECT id FROM users WHERE email=? AND role='admin'", (email,))
+        if not user:
+            raise click.ClickException('Администратор с таким email не найден.')
+        db().execute('UPDATE users SET password=?,session_version=session_version+1 WHERE id=?',
+                     (generate_password_hash(password), user['id']))
+        db().commit()
+        click.echo('Пароль администратора обновлён; прежние сессии завершены.')
 
     @app.cli.command('seed-demo')
     def seed_demo():
