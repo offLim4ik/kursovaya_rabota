@@ -2,6 +2,9 @@ import io
 import os
 from pathlib import Path
 
+from reportlab.graphics import renderPDF
+from reportlab.graphics.barcode.qr import QrCodeWidget
+from reportlab.graphics.shapes import Drawing
 from reportlab.lib.colors import HexColor
 from reportlab.lib.utils import simpleSplit
 from reportlab.pdfbase import pdfmetrics
@@ -9,7 +12,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 
 
-def certificate_pdf(certificate):
+def certificate_pdf(certificate, verify_url=''):
     font_path = os.environ.get('PDF_FONT') or next((str(p) for p in [
         Path('C:/Windows/Fonts/arial.ttf'), Path('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')
     ] if p.exists()), '')
@@ -143,6 +146,20 @@ def certificate_pdf(certificate):
     canvas.setFillColor(muted)
     canvas.setFont('Certificate', 8)
     canvas.drawCentredString(667, 56, 'Вектор · знания в действии')
+
+    if verify_url:
+        qr_size = 66
+        qr_widget = QrCodeWidget(verify_url)
+        qr_widget.barWidth = qr_size
+        qr_widget.barHeight = qr_size
+        qr_widget.barBorder = 2
+        qr_widget.barFillColor = ink
+        qr_drawing = Drawing(qr_size, qr_size)
+        qr_drawing.add(qr_widget)
+        renderPDF.draw(qr_drawing, canvas, 716, 112)
+        canvas.setFillColor(muted)
+        canvas.setFont('Certificate', 7)
+        canvas.drawCentredString(749, 101, 'ПРОВЕРИТЬ ОНЛАЙН')
 
     canvas.showPage()
     canvas.save()

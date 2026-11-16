@@ -225,6 +225,7 @@ node --check static\app.js
 | DATABASE | Путь к SQLite, по умолчанию instance/platform.sqlite3 |
 | COOKIE_SECURE | 1 при HTTPS, 0 для локального HTTP |
 | PDF_FONT | Путь к TTF с кириллицей; автоматически Arial в Windows или DejaVu Sans в Linux |
+| PUBLIC_URL | Необязательный публичный адрес сайта для ссылок проверки сертификатов в QR-кодах; например, `https://example.org` |
 
 ## Структура исходников
 

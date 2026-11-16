@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import re
 import secrets
 import time
@@ -441,6 +442,14 @@ def media(mid):
     return send_file(Path(current_app.config['UPLOAD_FOLDER']) / m['path'], as_attachment=m['kind'] == 'file', download_name=m['name'])
 
 
+@api.get('/certificates/<cid>/verify')
+def verify_certificate(cid):
+    certificate = one('SELECT id,name,course,issued_at FROM certificates WHERE id=?', (cid,))
+    if not certificate:
+        abort(404, 'Сертификат не найден.')
+    return jsonify(valid=True, certificate=certificate)
+
+
 @api.get('/certificates/<cid>/pdf')
 @require()
 def certificate(cid):
@@ -448,4 +457,6 @@ def certificate(cid):
     if not c:
         abort(404, 'Сертификат не найден.')
     from .pdf import certificate_pdf
-    return send_file(certificate_pdf(c), mimetype='application/pdf', as_attachment=True, download_name=f'certificate-{cid}.pdf')
+    public_url = os.environ.get('PUBLIC_URL', '').strip().rstrip('/') or request.url_root.rstrip('/')
+    verify_url = public_url + '/verify/' + cid
+    return send_file(certificate_pdf(c, verify_url), mimetype='application/pdf', as_attachment=True, download_name=f'certificate-{cid}.pdf')
