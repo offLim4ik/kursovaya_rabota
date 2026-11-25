@@ -35,6 +35,15 @@ def text(value, minimum=0, maximum=10000):
     return value.strip()
 
 
+def person_name(value):
+    """Accept names made of Unicode letters separated by spaces."""
+    value = text(value, 2, 80)
+    normalized = ' '.join(value.split())
+    if any(not (character.isalpha() or character == ' ') for character in normalized):
+        abort(400, 'Имя может содержать только буквы и пробелы.')
+    return normalized
+
+
 def integer(value, minimum=1, maximum=1000000):
     try:
         number = int(value)

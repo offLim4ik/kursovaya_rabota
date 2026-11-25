@@ -1,3 +1,4 @@
+import ast
 import io
 import json
 from pathlib import Path
@@ -28,7 +29,7 @@ def call(client, path, method='GET', body=None):
 
 
 def register(client, email='student@example.test'):
-    response = call(client, '/register', 'POST', {'email': email, 'name': 'Анна Тестовая', 'password': 'Student-password-123', 'role': 'admin'})
+    response = call(client, '/register', 'POST', {'email': email, 'name': 'Анна Тестовая', 'password': 'Student-password-123', 'role': 'admin', 'policy_version': 'privacy-2026-11-v1', 'pd_consent_version': 'consent-2026-11-v1'})
     assert response.status_code == 201
     assert response.json['user']['role'] == 'user'
     return response.json['user']
@@ -66,6 +67,57 @@ def test_registration_login_session_password(app):
     call(client, '/logout', 'POST', {})
     assert client.get('/api/session').json['user'] is None
     assert call(client, '/login', 'POST', {'email': user['email'], 'password': 'Replacement-123'}).status_code == 200
+
+
+def test_registration_requires_separate_consents_and_letter_only_name(app):
+    client = app.test_client()
+    base = {'email': 'consent@example.test', 'name': 'Анна Петрова', 'password': 'Student-password-123',
+            'policy_version': 'privacy-2026-11-v1', 'pd_consent_version': 'consent-2026-11-v1'}
+    missing_policy = {**base, 'policy_version': ''}
+    assert call(client, '/register', 'POST', missing_policy).status_code == 400
+    missing_consent = {**base, 'pd_consent_version': ''}
+    assert call(client, '/register', 'POST', missing_consent).status_code == 400
+    for value in ('Анна2', 'Анна-Петрова', "Анна'", 'Анна😊'):
+        assert call(client, '/register', 'POST', {**base, 'name': value}).status_code == 400
+    response = call(client, '/register', 'POST', base)
+    assert response.status_code == 201
+    with app.app_context():
+        user = one('SELECT * FROM users WHERE email=?', (base['email'],))
+        assert user['policy_version'] == base['policy_version']
+        assert user['pd_consent_version'] == base['pd_consent_version']
+        assert user['pd_consent_at']
+
+
+def test_sql_injection_strings_are_data_and_do_not_change_database(admin, app):
+    payload = "Курс'; DROP TABLE users; --"
+    created = call(admin, '/admin/courses', 'POST', {'title': payload})
+    assert created.status_code == 201
+    assert call(admin, '/admin/courses/' + str(created.json['id'])).json['title'] == payload
+    search = call(admin, '/courses?q=%27%20OR%201%3D1%20--')
+    assert search.status_code == 200
+    with app.app_context():
+        assert one('SELECT count(*) n FROM users')['n'] == 1
+        assert one("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+        assert one('SELECT title FROM courses WHERE id=?', (created.json['id'],))['title'] == payload
+
+
+def test_application_sql_queries_keep_user_values_out_of_sql_text():
+    root = Path(__file__).resolve().parents[1] / 'platform_app'
+    violations = []
+    for path in root.glob('*.py'):
+        if path.name == 'db.py':  # Database wrappers accept SQL internally; callers are audited below.
+            continue
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else (
+                node.func.id if isinstance(node.func, ast.Name) else '')
+            if name in {'execute', 'executescript', 'one', 'rows'} and node.args:
+                query = node.args[0]
+                if not isinstance(query, ast.Constant) or not isinstance(query.value, str):
+                    violations.append(f'{path.name}:{node.lineno} {name}() query must be a literal SQL statement')
+    assert not violations, '\n'.join(violations)
 
 
 def test_csrf_roles_and_unknown_account(app):
@@ -253,7 +305,7 @@ def test_demo_and_migrations_idempotent(app):
         assert one('SELECT count(*) n FROM courses')['n'] == 6
         assert one('SELECT count(*) n FROM certificates')['n'] > 0
         assert one('SELECT count(*) n FROM reviews')['n'] > 0
-        assert one('SELECT count(*) n FROM migrations')['n'] == 4
+        assert one('SELECT count(*) n FROM migrations')['n'] == 5
     assert runner.invoke(args=['seed-demo']).exit_code != 0
     assert runner.invoke(args=['enrich-demo']).exit_code == 0
     with app.app_context():

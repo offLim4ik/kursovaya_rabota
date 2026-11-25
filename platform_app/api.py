@@ -24,6 +24,7 @@ from .services import (
     event,
     integer,
     lesson_access,
+    person_name,
     public_user,
     quiz_data,
     require,
@@ -61,10 +62,15 @@ def register():
     email = text(d.get('email'), 5, 254).lower()
     if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email):
         abort(400, 'Введите корректный email.')
-    name = text(d.get('name'), 2, 80)
+    if d.get('policy_version') != 'privacy-2026-11-v1':
+        abort(400, 'Подтвердите ознакомление с Политикой обработки персональных данных.')
+    if d.get('pd_consent_version') != 'consent-2026-11-v1':
+        abort(400, 'Дайте отдельное согласие на обработку персональных данных.')
+    name = person_name(d.get('name'))
     password = text(d.get('password'), 10, 128)
-    uid = db().execute('INSERT INTO users(email,name,password) VALUES (?,?,?)',
-                       (email, name, generate_password_hash(password))).lastrowid
+    uid = db().execute('INSERT INTO users(email,name,password,policy_version,pd_consent_version,pd_consent_at) '
+                       'VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)',
+                       (email, name, generate_password_hash(password), d['policy_version'], d['pd_consent_version'])).lastrowid
     db().commit()
     session.clear()
     session.permanent = True
@@ -101,7 +107,7 @@ def logout():
 @require()
 def profile():
     d = data()
-    name = text(d.get('name'), 2, 80)
+    name = person_name(d.get('name'))
     avatar = text(d.get('avatar', ''), maximum=100)
     if avatar and not one("SELECT id FROM materials WHERE '/api/media/'||id=? AND owner_id=? AND public=1 AND kind='image'", (avatar, g.user['id'])):
         abort(400, 'Сначала загрузите аватар.')

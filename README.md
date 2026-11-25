@@ -15,7 +15,7 @@ Xgo$B&y04b#CEe%zkbVp69jS
 - Bleach: очистка форматированного HTML; Pillow: проверка и повторное кодирование изображений.
 - ReportLab: PDF-сертификаты со встроенным Unicode-шрифтом.
 - Waitress: production WSGI-сервер, совместимый с Windows.
-- Pytest, Ruff, Mypy: интеграционные тесты, линтер и базовая статическая проверка Python.
+- Pytest, Selenium WebDriver, Ruff, Mypy: интеграционные и браузерные тесты, линтер и базовая статическая проверка Python.
 
 Frontend и API работают с одного origin. Пользователи, курсы, прогресс, попытки, заметки и сертификаты хранятся в SQLite. В sessionStorage находится только адрес возврата после входа, учебные данные туда не записываются.
 
@@ -161,6 +161,26 @@ node --check static\app.js
 ```
 
 В Linux/macOS вместо `.venv\Scripts\...` используйте `.venv/bin/...`. Для установки проверок нужны пакеты из `requirements-dev.txt`.
+
+Полный проверенный набор включает 27 тестов Flask/SQLite и 7 Selenium-сценариев (34 всего). Он охватывает регистрацию с отдельными согласиями, проверку имени, права доступа, прогресс, тесты и SQL-инъекционные строки. Для браузерной части нужен установленный Microsoft Edge; Selenium Manager подбирает совместимый драйвер при запуске. Первый запуск может скачать WebDriver.
+
+PowerShell:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests -v --basetemp=tmp\pytest-run --junitxml=output\evidence\pytest.xml
+.venv\Scripts\python.exe scripts\build_test_report.py output\evidence\pytest.xml output\evidence\pytest-report.html
+.venv\Scripts\python.exe scripts\capture_test_report.py output\evidence\pytest-report.html output\evidence\pytest-report.png
+```
+
+macOS/Linux:
+
+```bash
+.venv/bin/python -m pytest tests -v --basetemp=tmp/pytest-run --junitxml=output/evidence/pytest.xml
+.venv/bin/python scripts/build_test_report.py output/evidence/pytest.xml output/evidence/pytest-report.html
+.venv/bin/python scripts/capture_test_report.py output/evidence/pytest-report.html output/evidence/pytest-report.png
+```
+
+JUnit XML хранит машинно-читаемые результаты, HTML-страница собирает статусы и длительность тестов, а Selenium сохраняет снимок отчёта. Генерация отчёта не подменяет запуск тестов: всегда запускайте Pytest перед созданием снимка.
 
 ## Основные сценарии
 
